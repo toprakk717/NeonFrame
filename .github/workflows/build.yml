@@ -1,0 +1,73 @@
+name: Build Windows x64
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  test-and-build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          architecture: x64
+
+      - name: Install full deps (tests + ONNX export)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller==6.12.0
+
+      - name: Export YOLOv8n ONNX weights
+        run: |
+          python -c "from ultralytics import YOLO; YOLO('yolov8n.pt').export(format='onnx', imgsz=640, simplify=True)"
+          if (-not (Test-Path yolov8n.onnx)) { throw 'yolov8n.onnx missing after export' }
+
+      - name: Run unit tests
+        run: python -m unittest discover -s tests -v
+
+      - name: Install slim runtime deps for packaging
+        run: |
+          pip uninstall -y torch torchvision torchaudio ultralytics 2>$null
+          pip install -r requirements-runtime.txt
+
+      - name: Build executable
+        run: >
+          pyinstaller --noconfirm --clean --windowed
+          --name NeonFrame
+          --collect-all cv2
+          --collect-all PySide6
+          --collect-all onnxruntime
+          --collect-all mss
+          --add-data "yolov8n.onnx;."
+          main.py
+
+      - name: Package ZIP
+        shell: pwsh
+        run: |
+          $exe = "dist/NeonFrame/NeonFrame.exe"
+          if (-not (Test-Path $exe)) { throw "NeonFrame.exe was not produced at $exe" }
+          New-Item -ItemType Directory -Force -Path package | Out-Null
+          Copy-Item -Recurse -Force dist/NeonFrame/* package/
+          Copy-Item -Force README.md package/
+          Copy-Item -Force yolov8n.onnx package/
+          Compress-Archive -Path package/* -DestinationPath NeonFrame-Windows-x64.zip -Force
+          Get-Item NeonFrame-Windows-x64.zip | Format-List Name, Length, FullName
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: NeonFrame-Windows-x64
+          path: NeonFrame-Windows-x64.zip
+          if-no-files-found: error
+          retention-days: 14
